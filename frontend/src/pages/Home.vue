@@ -22,5 +22,21 @@ onMounted(async () => {
     <div class="stat"><div class="label">今日流水笔数</div><div class="value">{{ dash.line_count_today }}</div></div>
     <div class="stat"><div class="label">系统合计</div><div class="value">{{ dash.system_total_today.toFixed(2) }}</div></div>
     <div class="stat"><div class="label">封账状态</div><div class="value">{{ dash.sealed_today ? '已封' : '未封' }}</div></div>
+    <div class="stat">
+      <div class="label">未决长短款笔数</div>
+      <div class="value" :class="dash.open_variance_count ? 'value-bad' : ''">{{ dash.open_variance_count }}</div>
+    </div>
+    <div class="stat">
+      <div class="label">未决长短款合计</div>
+      <div class="value" :class="dash.open_variance_count ? 'value-bad' : ''">{{ dash.open_variance_total.toFixed(2) }}</div>
+    </div>
+    <div class="stat stat-wide">
+      <div class="label">封账闸（全局互斥）</div>
+      <div class="value">
+        <span class="tag" :class="dash.pending_gate.blocked ? 'bad' : 'ok'">
+          {{ dash.pending_gate.blocked ? '拦截中：清 pending 前禁止一切新封' : '开放：可封账' }}
+        </span>
+      </div>
+    </div>
   </div>
 </template>

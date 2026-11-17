@@ -13,6 +13,8 @@ def dashboard() -> dict[str, Any]:
         day = settings_repo.get(conn, "business_day") or ""
         total, count = line_repo.day_total(conn, day) if day else (0.0, 0)
         sealed = close_repo.is_sealed(conn, day) if day else False
+        # 未决计数/合计/闸状态与封账台共用同一查询，杜绝两套口径
+        pending_gate = close_repo.pending_summary(conn)
         return {
             "business_day": day,
             "till_count": len(till_repo.list_tills(conn)),
@@ -20,9 +22,9 @@ def dashboard() -> dict[str, Any]:
             "system_total_today": total,
             "sealed_today": sealed,
             "close_batch_count": conn.execute("SELECT COUNT(*) c FROM close_batches").fetchone()["c"],
-            "open_variance_count": conn.execute(
-                "SELECT COUNT(*) c FROM variance_rows WHERE disposition='pending'"
-            ).fetchone()["c"],
+            "open_variance_count": pending_gate["pending_count"],
+            "open_variance_total": pending_gate["pending_total"],
+            "pending_gate": pending_gate,
         }
     finally:
         conn.close()

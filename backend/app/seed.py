@@ -2,6 +2,12 @@ from __future__ import annotations
 from app.db import connect
 
 
+# 长短款状态机：pending 为唯一未决态，其余均为终态（不可再改）。
+PENDING_DISPOSITION = "pending"
+TERMINAL_DISPOSITIONS = ("balanced", "loss", "gain", "writeoff")
+RESOLVABLE_DISPOSITIONS = ("loss", "gain", "writeoff")
+
+
 SCHEMA = '''
 CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY,
@@ -41,7 +47,9 @@ CREATE TABLE IF NOT EXISTS variance_rows (
   business_day TEXT NOT NULL,
   variance REAL NOT NULL,
   disposition TEXT NOT NULL,
-  created_at TEXT NOT NULL
+  created_at TEXT NOT NULL,
+  resolved_at TEXT,
+  resolved_reason TEXT
 );
 CREATE TABLE IF NOT EXISTS variance_holds (
   id INTEGER PRIMARY KEY,
@@ -56,10 +64,20 @@ CREATE TABLE IF NOT EXISTS reopen_requests (
 '''
 
 
+def _migrate(conn) -> None:
+    """对旧库补列；CREATE TABLE IF NOT EXISTS 不会改变已存在的表结构。"""
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(variance_rows)").fetchall()}
+    if cols and "resolved_at" not in cols:
+        conn.execute("ALTER TABLE variance_rows ADD COLUMN resolved_at TEXT")
+    if cols and "resolved_reason" not in cols:
+        conn.execute("ALTER TABLE variance_rows ADD COLUMN resolved_reason TEXT")
+
+
 def seed_if_empty() -> None:
     conn = connect()
     try:
         conn.executescript(SCHEMA)
+        _migrate(conn)
         n = conn.execute("SELECT COUNT(*) c FROM tills").fetchone()["c"]
         if n:
             return

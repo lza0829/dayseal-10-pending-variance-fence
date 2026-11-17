@@ -6,10 +6,19 @@ from app.db import connect
 from app.repositories import closes as close_repo
 from app.repositories import lines as line_repo
 from app.repositories import settings as settings_repo
+from app.seed import PENDING_DISPOSITION, RESOLVABLE_DISPOSITIONS
 
 
 def _now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def gate_status() -> dict[str, Any]:
+    conn = connect()
+    try:
+        return close_repo.pending_summary(conn)
+    finally:
+        conn.close()
 
 
 def preview(business_day: str | None = None) -> dict[str, Any]:
@@ -23,6 +32,8 @@ def preview(business_day: str | None = None) -> dict[str, Any]:
             "line_count": count,
             "sealed": close_repo.is_sealed(conn, day),
             "lines": line_repo.list_lines(conn, day),
+            # 未决闸状态与封账台、总览同源
+            "pending_gate": close_repo.pending_summary(conn),
         }
     finally:
         conn.close()
@@ -36,6 +47,15 @@ def seal(body: dict[str, Any]) -> dict[str, Any]:
             raise HTTPException(400, "未指定营业日")
         if close_repo.is_sealed(conn, day):
             raise HTTPException(409, f"营业日 {day} 已封账")
+        # 全局互斥闸：存在任意 pending 长短款时，禁止对任何营业日新封账。
+        # 与预览/总览共用 pending_summary 单一数据源，避免「显示已清仍拒封」。
+        gate = close_repo.pending_summary(conn)
+        if gate["blocked"]:
+            raise HTTPException(
+                409,
+                f"未决长短款闸拦截：存在 {gate['pending_count']} 笔 pending "
+                f"（未决合计 {gate['pending_total']:.2f}），必须先清为认损/认溢/核销终态后才能封账",
+            )
         declared = float(body["declared_cash"])
         total, count = line_repo.day_total(conn, day)
         variance = round(declared - total, 2)
@@ -52,7 +72,7 @@ def seal(body: dict[str, Any]) -> dict[str, Any]:
             sealed_at=sealed_at,
             note=body.get("note"),
         )
-        disposition = "pending" if abs(variance) > 1e-9 else "balanced"
+        disposition = PENDING_DISPOSITION if abs(variance) > 1e-9 else "balanced"
         close_repo.add_variance(
             conn,
             batch_id=batch_id,
@@ -72,6 +92,47 @@ def seal(body: dict[str, Any]) -> dict[str, Any]:
             "status": "sealed",
             "disposition": disposition,
         }
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def resolve_variance(variance_id: int, body: dict[str, Any]) -> dict[str, Any]:
+    """清 pending 的唯一写入口：pending -> 认损/认溢/核销（终态）。
+
+    封账闸读的是同一张 variance_rows 表的同一个 pending 判定，
+    因此本事务提交后闸状态立即翻转，不存在「页面已清仍拒封」。
+    """
+    disposition = (body.get("disposition") or "").strip()
+    if disposition not in RESOLVABLE_DISPOSITIONS:
+        raise HTTPException(
+            400,
+            f"非法处置终态 {disposition!r}，可选：{', '.join(RESOLVABLE_DISPOSITIONS)}",
+        )
+    reason = (body.get("reason") or None)
+    conn = connect(immediate=True)
+    try:
+        row = close_repo.get_variance(conn, variance_id)
+        if not row:
+            raise HTTPException(404, "长短款记录不存在")
+        if row["disposition"] != PENDING_DISPOSITION:
+            raise HTTPException(
+                409,
+                f"长短款 {variance_id} 已处于终态 {row['disposition']}，不可重复处置",
+            )
+        close_repo.resolve_variance(
+            conn,
+            variance_id,
+            disposition=disposition,
+            resolved_at=_now(),
+            reason=reason,
+        )
+        conn.commit()
+        resolved = close_repo.get_variance(conn, variance_id)
+        gate = close_repo.pending_summary(conn)
+        return {"variance": resolved, "pending_gate": gate}
     except Exception:
         conn.rollback()
         raise
